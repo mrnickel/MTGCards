@@ -1,0 +1,4 @@
+# Local HTTPS certs for LAN testing — never commit the private key
+.certs/
+nohup.out
+.DS_Store
