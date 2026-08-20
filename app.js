@@ -41,6 +41,15 @@ let qrMode = false, qrTimer = null, qrGot = null;
 
 const setStatus = msg => (statusEl.textContent = msg);
 
+let toastTimer = null;
+function toast(msg, ms = 5000) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, ms);
+}
+
 // ---------- Tabs ----------
 $('tab-scan').onclick = () => showView('scan');
 $('tab-collection').onclick = () => showView('collection');
@@ -281,10 +290,45 @@ function parseFooter(text) {
 }
 
 // ---------- Scryfall ----------
-async function sf(path) {
-  const r = await fetch('https://api.scryfall.com' + path);
-  if (!r.ok) return null;
-  return r.json();
+// All Scryfall calls flow through one queue that enforces the documented
+// hard limits (500ms between /cards/named|search calls, 100ms otherwise)
+// and honors HTTP 429 by pausing all lookups for the penalty window.
+const SF_SPACING = { named: 550, default: 110 };   // ms, small safety buffer
+const sfLast = { named: 0, default: 0 };
+let sfChain = Promise.resolve();
+let sfBlockedUntil = 0;
+let sfLastError = null;          // '429' | 'network' | null — outcome of the most recent call
+const sfCooldownSecs = () => Math.max(0, Math.ceil((sfBlockedUntil - Date.now()) / 1000));
+
+function sf(path) {
+  const tier = /^\/cards\/(named|search|random|collection)/.test(path) ? 'named' : 'default';
+  const call = sfChain.then(async () => {
+    if (Date.now() < sfBlockedUntil) { sfLastError = '429'; return null; }
+    const wait = sfLast[tier] + SF_SPACING[tier] - Date.now();
+    if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    sfLast[tier] = Date.now();
+    try {
+      const r = await fetch('https://api.scryfall.com' + path);
+      if (r.status === 429) {
+        const retry = parseInt(r.headers.get('Retry-After'), 10) || 30;
+        sfBlockedUntil = Date.now() + retry * 1000;
+        sfLastError = '429';
+        toast(`⏳ Scryfall rate limit reached — pausing lookups for ${retry}s`, retry * 1000);
+        console.warn(`Scryfall 429 — pausing lookups ${retry}s`);
+        return null;
+      }
+      sfLastError = null;
+      if (!r.ok) return null;
+      return r.json();
+    } catch (e) {
+      if (sfLastError !== 'network') toast('⚠ Network error reaching Scryfall — check your connection.');
+      sfLastError = 'network';
+      console.warn('Scryfall fetch failed', e);
+      return null;
+    }
+  });
+  sfChain = call;
+  return call;
 }
 const lookupCard = (name, set) =>
   sf('/cards/named?fuzzy=' + encodeURIComponent(name) + (set ? '&set=' + encodeURIComponent(set) : ''));
@@ -330,9 +374,16 @@ function similarity(a, b) {
 }
 const MIN_SIMILARITY = 0.7;
 
+const MISS = Symbol('miss');
 async function cached(key, fn) {
-  if (!lookupCache.has(key)) lookupCache.set(key, await fn());
-  return lookupCache.get(key);
+  if (!lookupCache.has(key)) {
+    const v = await fn();
+    if (v) lookupCache.set(key, v);
+    else if (Date.now() >= sfBlockedUntil) lookupCache.set(key, MISS);  // real miss, not a cooldown
+    else return null;
+  }
+  const v = lookupCache.get(key);
+  return v === MISS ? null : v;
 }
 
 // Resolve (name guesses, footer) → { card, setConfirmed } or null
@@ -391,6 +442,10 @@ function preview(id, src) {
 const STREAK_FULL = 2, STREAK_FOOTER = 3;
 
 async function scanOnce() {
+  if (Date.now() < sfBlockedUntil) {
+    setStatus(`Scryfall rate limit hit — resuming in ${Math.ceil((sfBlockedUntil - Date.now()) / 1000)}s…`);
+    return;
+  }
   let hit = null, nameLines = [], footer = { set: null, number: null };
   if (scanMode === 'footer') {
     const crop = captureRegion(null, 300);
@@ -452,7 +507,12 @@ async function manualLookup() {
   if (!name) return;
   setStatus('Looking up "' + name + '"…');
   const card = await lookupCard(name);
-  if (!card) { setStatus('No match for "' + name + '".'); return; }
+  if (!card) {
+    if (sfLastError === '429') setStatus(`Rate limited — try again in ${sfCooldownSecs()}s.`);
+    else if (sfLastError === 'network') setStatus('Network error — could not reach Scryfall.');
+    else setStatus('No match for "' + name + '".');
+    return;
+  }
   showResult(summarize(card));
 }
 
@@ -661,7 +721,20 @@ async function importEntries(entries) {
   let done = 0, failed = [];
   for (const e of entries) {
     setStatus(`Importing ${++done}/${entries.length} — ${e.set.toUpperCase()} #${e.number}…`);
-    const card = await cached(`p:${e.set}/${e.number}`, () => lookupPrinting(e.set, e.number));
+    let card = null;
+    for (let attempt = 0; attempt < 3 && !card; attempt++) {
+      card = await cached(`p:${e.set}/${e.number}`, () => lookupPrinting(e.set, e.number));
+      if (card) break;
+      if (sfLastError === '429') {                      // wait out the penalty, then retry
+        while (sfCooldownSecs() > 0) {
+          setStatus(`Rate limited — import resumes in ${sfCooldownSecs()}s (${done - 1}/${entries.length} done)…`);
+          await new Promise(r => setTimeout(r, 1000));
+        }
+      } else if (sfLastError === 'network') {
+        setStatus('Network error — retrying…');
+        await new Promise(r => setTimeout(r, 2000));
+      } else break;                                     // genuine 404 — don't retry
+    }
     if (!card) { failed.push(`${e.set.toUpperCase()} #${e.number}`); continue; }
     const c = summarize(card);
     const existing = await dbGet(c.id);

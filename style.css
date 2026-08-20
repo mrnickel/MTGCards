@@ -77,7 +77,10 @@ button.link { background: none; border: none; color: var(--accent); padding: 0; 
   display: flex; gap: 1rem; background: var(--panel);
   border: 1px solid var(--border); border-radius: 10px; padding: 1rem;
 }
-.result img { width: 140px; border-radius: 6px; flex-shrink: 0; }
+.result img {
+  width: 140px; aspect-ratio: 63 / 88; object-fit: contain;
+  border-radius: 6px; flex-shrink: 0; background: #0a0c10;
+}
 .result-info { flex: 1; min-width: 0; }
 .result-info h2 { margin: 0 0 .25rem; font-size: 1.2rem; }
 .result-info p { margin: .25rem 0; color: var(--muted); font-size: .9rem; white-space: pre-line; }
@@ -90,7 +93,7 @@ button.link { background: none; border: none; color: var(--accent); padding: 0; 
   background: var(--panel); border: 1px solid var(--border);
   border-radius: 8px; padding: .5rem .75rem;
 }
-.card-row img { width: 48px; border-radius: 3px; }
+.card-row img { width: 48px; aspect-ratio: 63 / 88; object-fit: contain; border-radius: 3px; background: #0a0c10; flex-shrink: 0; }
 .card-row .info { flex: 1; min-width: 0; }
 .card-row .name { font-weight: 600; }
 .card-row .meta { color: var(--muted); font-size: .85rem; }
@@ -128,3 +131,10 @@ button.link { background: none; border: none; color: var(--accent); padding: 0; 
 .mode-row .mode.active { color: var(--text); border-color: var(--accent); }
 .guide.footer-mode .name-box, .guide.footer-mode .footer-box { display: none; }
 .guide.footer-mode .card-outline { border-style: solid; border-color: var(--accent); border-radius: 6px; }
+.toast {
+  position: fixed; left: 50%; bottom: 1.25rem; transform: translateX(-50%);
+  background: var(--panel); color: var(--text);
+  border: 1px solid var(--accent); border-radius: 8px;
+  padding: .6rem 1rem; font-size: .9rem; z-index: 20;
+  max-width: 90vw; text-align: center; box-shadow: 0 4px 16px rgba(0,0,0,.5);
+}
