@@ -35,6 +35,9 @@ const dbClear = () => tx('readwrite', s => s.clear());
 const $ = id => document.getElementById(id);
 const video = $('video'), canvas = $('capture'), statusEl = $('status');
 let stream = null, facing = 'environment', pending = null, ocrWorker = null;
+let scanning = false, scanTimer = null;
+let lastId = '', streak = 0, lockedId = null, missCount = 0;
+let qrMode = false, qrTimer = null, qrGot = null;
 
 const setStatus = msg => (statusEl.textContent = msg);
 
@@ -84,17 +87,23 @@ function setupZoom() {
   if (!caps.zoom) { row.hidden = true; return; }
   row.hidden = false;
   slider.min = caps.zoom.min; slider.max = caps.zoom.max; slider.step = caps.zoom.step || 0.1;
-  const saved = parseFloat(localStorage.getItem('mtg-zoom'));
-  const initial = Math.min(caps.zoom.max, Math.max(caps.zoom.min, isNaN(saved) ? caps.zoom.min : saved));
-  slider.value = initial;
-  applyZoom(initial);
+  applySavedZoom();
   slider.oninput = () => applyZoom(parseFloat(slider.value));
+}
+function applySavedZoom() {
+  const track = stream && stream.getVideoTracks()[0];
+  const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+  if (!caps.zoom) return;
+  const saved = parseFloat(localStorage.getItem('mtg-zoom-' + scanMode));
+  const z = Math.min(caps.zoom.max, Math.max(caps.zoom.min, isNaN(saved) ? caps.zoom.min : saved));
+  $('zoom').value = z;
+  applyZoom(z);
 }
 async function applyZoom(z) {
   const track = stream && stream.getVideoTracks()[0];
   if (!track) return;
   $('zoom-val').textContent = z.toFixed(1) + '×';
-  localStorage.setItem('mtg-zoom', z);
+  localStorage.setItem('mtg-zoom-' + scanMode, z);
   try { await track.applyConstraints({ advanced: [{ zoom: z }] }); }
   catch (e) { console.warn('zoom failed', e); }
 }
@@ -121,6 +130,11 @@ async function ocr(canvas, profile) {
 // relative to the card (fractions of card width/height).
 const CARD_DEFAULT = { x: 0.06, y: 0.04, w: 0.88, h: 0.92 };
 const CARD = Object.assign({}, CARD_DEFAULT, JSON.parse(localStorage.getItem('mtg-guide') || '{}'));
+// Footer-only mode: one big strip the camera zooms into — its own saved rect.
+const FOOT_DEFAULT = { x: 0.08, y: 0.35, w: 0.84, h: 0.30 };
+const FOOT = Object.assign({}, FOOT_DEFAULT, JSON.parse(localStorage.getItem('mtg-guide-footer') || '{}'));
+let scanMode = localStorage.getItem('mtg-mode') || 'full';
+const activeRect = () => (scanMode === 'footer' ? FOOT : CARD);
 const REGIONS = {
   name:   { x: 0.06, y: 0.040, w: 0.78, h: 0.070 },   // title bar
   footer: { x: 0.03, y: 0.930, w: 0.60, h: 0.060 },   // bottom-left: collector no. / set code
@@ -132,7 +146,7 @@ function layoutGuides() {
   const place = (el, r) => Object.assign(el.style, {
     left: r.x * 100 + '%', top: r.y * 100 + '%', width: r.w * 100 + '%', height: r.h * 100 + '%',
   });
-  place(document.querySelector('.card-outline'), CARD);
+  place(document.querySelector('.card-outline'), activeRect());
   place(document.querySelector('.name-box'), regionRect(REGIONS.name));
   place(document.querySelector('.footer-box'), regionRect(REGIONS.footer));
 }
@@ -152,25 +166,26 @@ layoutGuides();
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   function down(e, mode) {
     e.preventDefault(); e.stopPropagation();
-    drag = { mode, start: frac(e), card: { ...CARD } };
+    drag = { mode, start: frac(e), card: { ...activeRect() } };
     e.target.setPointerCapture(e.pointerId);
   }
   function move(e) {
     if (!drag) return;
     const p = frac(e), dx = p.x - drag.start.x, dy = p.y - drag.start.y;
+    const R = activeRect();
     if (drag.mode === 'move') {
-      CARD.x = clamp(drag.card.x + dx, 0, 1 - CARD.w);
-      CARD.y = clamp(drag.card.y + dy, 0, 1 - CARD.h);
+      R.x = clamp(drag.card.x + dx, 0, 1 - R.w);
+      R.y = clamp(drag.card.y + dy, 0, 1 - R.h);
     } else {
-      CARD.w = clamp(drag.card.w + dx, 0.2, 1 - CARD.x);
-      CARD.h = clamp(drag.card.h + dy, 0.2, 1 - CARD.y);
+      R.w = clamp(drag.card.w + dx, 0.1, 1 - R.x);
+      R.h = clamp(drag.card.h + dy, 0.05, 1 - R.y);
     }
     layoutGuides();
   }
   function up() {
     if (!drag) return;
     drag = null;
-    localStorage.setItem('mtg-guide', JSON.stringify(CARD));
+    localStorage.setItem(scanMode === 'footer' ? 'mtg-guide-footer' : 'mtg-guide', JSON.stringify(activeRect()));
   }
   outline.addEventListener('pointerdown', e => down(e, 'move'));
   handle.addEventListener('pointerdown', e => down(e, 'resize'));
@@ -178,15 +193,32 @@ layoutGuides();
   window.addEventListener('pointerup', up);
   window.addEventListener('pointercancel', up);
   $('btn-reset-guide').onclick = () => {
-    Object.assign(CARD, CARD_DEFAULT);
-    localStorage.removeItem('mtg-guide');
+    if (scanMode === 'footer') { Object.assign(FOOT, FOOT_DEFAULT); localStorage.removeItem('mtg-guide-footer'); }
+    else { Object.assign(CARD, CARD_DEFAULT); localStorage.removeItem('mtg-guide'); }
     layoutGuides();
   };
+
+  // ---- Mode toggle: full card (name + footer) vs footer-only (zoomed) ----
+  function setMode(m) {
+    scanMode = m;
+    localStorage.setItem('mtg-mode', m);
+    $('mode-full').classList.toggle('active', m === 'full');
+    $('mode-footer').classList.toggle('active', m === 'footer');
+    document.querySelector('.guide').classList.toggle('footer-mode', m === 'footer');
+    document.querySelector('#prev-name').parentElement.hidden = m === 'footer';
+    layoutGuides();
+    lastId = ''; streak = 0; lockedId = null;   // fresh detection state
+    if (stream) applySavedZoom();
+  }
+  $('mode-full').onclick = () => setMode('full');
+  $('mode-footer').onclick = () => setMode('footer');
+  setMode(scanMode);
 })();
 
 // Grab the region of the video that corresponds to an on-screen guide box.
+// In footer-only mode the outline rect IS the footer region.
 function captureRegion(region, targetHeight) {
-  const r = regionRect(region);
+  const r = scanMode === 'footer' ? FOOT : regionRect(region);
   const vw = video.videoWidth, vh = video.videoHeight;
   const ew = video.clientWidth, eh = video.clientHeight;
   // object-fit: cover — compute visible crop of the source video
@@ -284,8 +316,6 @@ function summarize(c) {
 // result panel and, if Auto-add is on and the set was confirmed from the
 // footer, added to the collection. It will not be added again until a
 // different card (or nothing) is seen for a few passes.
-let scanning = false, scanTimer = null;
-let lastId = '', streak = 0, lockedId = null, missCount = 0;
 const lookupCache = new Map();
 const guide = document.querySelector('.guide');
 
@@ -356,14 +386,29 @@ function preview(id, src) {
   const c = $(id); c.width = src.width; c.height = src.height;
   c.getContext('2d').drawImage(src, 0, 0);
 }
+// Footer-only mode: identify purely by set + collector number. No name
+// cross-check, so require a longer streak of identical reads before locking.
+const STREAK_FULL = 2, STREAK_FOOTER = 3;
+
 async function scanOnce() {
-  const nameCrop = captureRegion(REGIONS.name, 160), footerCrop = captureRegion(REGIONS.footer, 200);
-  preview('prev-name', nameCrop); preview('prev-footer', footerCrop);
-  const nameText = await ocr(nameCrop, 'name');
-  const footerText = await ocr(footerCrop, 'footer');
-  const nameLines = cleanOCR(nameText);
-  const footer = parseFooter(footerText);
-  const hit = await identify(nameLines, footer);
+  let hit = null, nameLines = [], footer = { set: null, number: null };
+  if (scanMode === 'footer') {
+    const crop = captureRegion(null, 300);
+    preview('prev-footer', crop);
+    footer = parseFooter(await ocr(crop, 'footer'));
+    if (footer.set && footer.number) {
+      const card = await cached(`p:${footer.set}/${footer.number}`, () => lookupPrinting(footer.set, footer.number));
+      if (card) hit = { card, setConfirmed: true };
+    }
+  } else {
+    const nameCrop = captureRegion(REGIONS.name, 160), footerCrop = captureRegion(REGIONS.footer, 200);
+    preview('prev-name', nameCrop); preview('prev-footer', footerCrop);
+    const nameText = await ocr(nameCrop, 'name');
+    const footerText = await ocr(footerCrop, 'footer');
+    nameLines = cleanOCR(nameText);
+    footer = parseFooter(footerText);
+    hit = await identify(nameLines, footer);
+  }
 
   if (!hit) {
     missCount++;
@@ -387,9 +432,10 @@ async function scanOnce() {
   if (card.id === lockedId) return;              // already handled this printing
   streak = card.id === lastId ? streak + 1 : 1;
   lastId = card.id;
-  setStatus(`Recognizing… ${card.name} (${card.set.toUpperCase()} #${card.collector_number}${setConfirmed ? '' : ', set unconfirmed'})`);
+  const need = scanMode === 'footer' ? STREAK_FOOTER : STREAK_FULL;
+  setStatus(`Recognizing… ${card.name} (${card.set.toUpperCase()} #${card.collector_number}) ${streak}/${need}`);
 
-  if (streak >= 2) {
+  if (streak >= need) {
     lockedId = card.id;
     guide.classList.add('locked');
     const c = summarize(card);
@@ -550,8 +596,6 @@ $('qr-next').onclick = () => { if (qrIndex < qrParts.length - 1) { qrIndex++; re
 $('qr-close').onclick = () => { $('qr-modal').hidden = true; };
 
 // ---- Receiving side ----
-let qrMode = false, qrTimer = null, qrGot = null;
-
 $('btn-scanqr').onclick = async () => {
   if (qrMode) { stopQRScan('QR scan cancelled.'); return; }
   showView('scan');

@@ -23,6 +23,8 @@ On a phone, deploy the three files to any static host (GitHub Pages, Netlify, Cl
 
 If OCR misses, you can type the name instead.
 
+**Footer-only mode** (fastest with a phone stand): switch the toggle above the camera to *Footer only*, zoom the camera in on just the bottom-left footer of the card, and drag the single strip over it. Cards are identified purely by set code + collector number — no name needed — after three identical consecutive reads (the extra read compensates for the missing name cross-check). Camera zoom and strip position are remembered per mode.
+
 ## Installable PWA
 
 The app is a Progressive Web App: open it over HTTPS and use "Install" / "Add to Home Screen" in the browser menu. The app shell and OCR/QR libraries are cached by a service worker, so after the first scan it opens instantly and card scanning works with a flaky connection (Scryfall lookups fall back to previously cached responses when offline).

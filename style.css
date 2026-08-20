@@ -123,3 +123,8 @@ button.link { background: none; border: none; color: var(--accent); padding: 0; 
 #qr-holder { background: #fff; border-radius: 8px; padding: 12px; margin: .75rem 0; }
 #qr-holder svg { display: block; width: 100%; height: auto; }
 .modal-box .result-actions { justify-content: center; }
+.mode-row { display: flex; gap: .5rem; margin: .75rem 0 0; }
+.mode-row .mode { flex: 1; color: var(--muted); }
+.mode-row .mode.active { color: var(--text); border-color: var(--accent); }
+.guide.footer-mode .name-box, .guide.footer-mode .footer-box { display: none; }
+.guide.footer-mode .card-outline { border-style: solid; border-color: var(--accent); border-radius: 6px; }
