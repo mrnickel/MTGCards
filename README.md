@@ -23,6 +23,10 @@ On a phone, deploy the three files to any static host (GitHub Pages, Netlify, Cl
 
 If OCR misses, you can type the name instead.
 
+## Installable PWA
+
+The app is a Progressive Web App: open it over HTTPS and use "Install" / "Add to Home Screen" in the browser menu. The app shell and OCR/QR libraries are cached by a service worker, so after the first scan it opens instantly and card scanning works with a flaky connection (Scryfall lookups fall back to previously cached responses when offline).
+
 ## Notes
 
 - Nothing is uploaded anywhere except the OCR'd *name text* sent to Scryfall for lookup. The camera image never leaves the device.

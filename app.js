@@ -636,4 +636,8 @@ async function importEntries(entries) {
 (async () => {
   db = await openDB();
   updateCount();
+  if ('serviceWorker' in navigator) {
+    try { await navigator.serviceWorker.register('sw.js'); }
+    catch (e) { console.warn('SW registration failed', e); }
+  }
 })();
