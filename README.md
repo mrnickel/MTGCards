@@ -19,7 +19,7 @@ On a phone, deploy the three files to any static host (GitHub Pages, Netlify, Cl
 2. Both strips are continuously captured and OCR'd in-browser with [Tesseract.js](https://github.com/naptha/tesseract.js). The footer's set code + collector number pin the **exact printing** via the [Scryfall API](https://scryfall.com/docs/api) (`/cards/{set}/{number}`), cross-checked against the OCR'd name. If the footer can't be read, it falls back to a name-only match and flags the set as unconfirmed (no auto-add).
 3. When the same card is read twice in a row it is recognized and (with **Auto-add** on) added automatically (stored in IndexedDB; quantities tracked per printing).
 4. **Collection** tab: filter, adjust quantities, remove, export/import JSON.
-5. **Transfer between devices**: Collection → **Share QR** encodes the whole collection (set/collector-number/qty, deflate-compressed) into one or more QR codes. On the other device tap **Scan QR** and point its camera at each code — cards are rehydrated from Scryfall and merged into that device's collection.
+5. **Transfer between devices**: Collection → **Share QR** encodes the whole collection (set/collector-number/qty, deflate-compressed) into one or more QR codes. Multi-part codes cycle automatically; on the other device tap **Scan QR**, fill the frame with the code and hold steady until every part is collected — cards are rehydrated from Scryfall and merged into that device's collection.
 
 If OCR misses, you can type the name instead.
 

@@ -609,7 +609,9 @@ $('btn-clear').onclick = async () => {
 // one or more QR codes (multi-part header MTGQR|<enc>|<part>|<total>|<data>).
 // The receiving device scans them with its camera and rehydrates each
 // printing from Scryfall by set + collector number.
-const QR_CHUNK = 1200;   // base64 chars per QR — conservative for easy scanning
+const QR_CHUNK = 250;    // base64 chars per QR — keeps codes ~65 modules so phone/webcam decode reliably
+const QR_CYCLE_MS = 1500; // auto-advance interval for multi-part codes
+let qrCycle = null;
 let qrParts = [], qrIndex = 0;
 
 const b64encode = bytes => btoa(String.fromCharCode(...bytes));
@@ -638,7 +640,13 @@ $('btn-share').onclick = async () => {
   qrIndex = 0;
   renderQR();
   $('qr-modal').hidden = false;
+  startQRCycle();
 };
+function startQRCycle() {
+  stopQRCycle();
+  if (qrParts.length > 1) qrCycle = setInterval(() => { qrIndex = (qrIndex + 1) % qrParts.length; renderQR(); }, QR_CYCLE_MS);
+}
+function stopQRCycle() { clearInterval(qrCycle); qrCycle = null; }
 
 function renderQR() {
   const qr = qrcode(0, 'M');
@@ -646,14 +654,14 @@ function renderQR() {
   qr.make();
   $('qr-holder').innerHTML = qr.createSvgTag({ scalable: true, margin: 2 });
   $('qr-part').textContent = qrParts.length > 1
-    ? `Part ${qrIndex + 1} of ${qrParts.length} — show each part to the scanner`
+    ? `Part ${qrIndex + 1} of ${qrParts.length} — cycling automatically; hold the scanner steady until it has every part`
     : 'Single code — contains the whole collection';
   $('qr-prev').disabled = qrIndex === 0;
   $('qr-next').disabled = qrIndex === qrParts.length - 1;
 }
-$('qr-prev').onclick = () => { if (qrIndex > 0) { qrIndex--; renderQR(); } };
-$('qr-next').onclick = () => { if (qrIndex < qrParts.length - 1) { qrIndex++; renderQR(); } };
-$('qr-close').onclick = () => { $('qr-modal').hidden = true; };
+$('qr-prev').onclick = () => { stopQRCycle(); if (qrIndex > 0) { qrIndex--; renderQR(); } };
+$('qr-next').onclick = () => { stopQRCycle(); if (qrIndex < qrParts.length - 1) { qrIndex++; renderQR(); } };
+$('qr-close').onclick = () => { stopQRCycle(); $('qr-modal').hidden = true; };
 
 // ---- Receiving side ----
 $('btn-scanqr').onclick = async () => {
@@ -664,35 +672,51 @@ $('btn-scanqr').onclick = async () => {
   qrMode = true;
   qrGot = { enc: null, total: null, parts: new Map() };
   $('btn-scanqr').textContent = 'Cancel QR';
+  $('qr-hint').hidden = false;
   setStatus('Point the camera at the QR code…');
+  setQRZoom(true);
   qrLoop();
 };
 function stopQRScan(msg) {
   qrMode = false;
   clearTimeout(qrTimer);
   $('btn-scanqr').textContent = 'Scan QR';
+  $('qr-hint').hidden = true;
+  setQRZoom(false);
   if (msg) setStatus(msg);
+}
+// The card-scanning zoom (esp. footer mode) is far too tight for a QR code —
+// zoom all the way out while scanning QR and restore the saved zoom afterwards.
+function setQRZoom(on) {
+  const track = stream && stream.getVideoTracks()[0];
+  const caps = track && track.getCapabilities ? track.getCapabilities() : {};
+  if (!caps.zoom) return;
+  if (on) {
+    $('zoom').value = caps.zoom.min; $('zoom-val').textContent = caps.zoom.min.toFixed(1) + '×';
+    track.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] }).catch(() => {});
+  } else applySavedZoom();
 }
 
 function qrLoop() {
   if (!qrMode || !stream) return;
   try {
     if (video.readyState >= 2) {
-      const w = Math.min(1024, video.videoWidth);
+      // Decode at (near) full camera resolution — small modules vanish when downscaled.
+      const w = Math.min(1920, video.videoWidth);
       const h = Math.round(video.videoHeight * (w / video.videoWidth));
       canvas.width = w; canvas.height = h;
       const ctx = canvas.getContext('2d', { willReadFrequently: true });
       ctx.drawImage(video, 0, 0, w, h);
-      const hit = jsQR(ctx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: 'dontInvert' });
+      const hit = jsQR(ctx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: 'attemptBoth' });
       if (hit && hit.data) handleQRPayload(hit.data);
     }
   } catch (e) { console.warn('qr pass failed', e); }
-  if (qrMode) qrTimer = setTimeout(qrLoop, 200);
+  if (qrMode) qrTimer = setTimeout(qrLoop, 250);
 }
 
 async function handleQRPayload(text) {
   const m = /^MTGQR\|([zr])\|(\d+)\|(\d+)\|([A-Za-z0-9+/=]+)$/.exec(text);
-  if (!m) return;                       // not one of ours
+  if (!m) { setStatus('That QR code is not an MTG Scanner collection code.'); return; }
   const [, enc, part, total, data] = m;
   qrGot.enc = enc; qrGot.total = Number(total);
   if (!qrGot.parts.has(Number(part))) {
