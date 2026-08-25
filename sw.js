@@ -1,6 +1,6 @@
 /* Service worker: precache the app shell; runtime-cache CDN libs and
    Scryfall card images; network-first for the Scryfall API. */
-const VERSION = 'v4';
+const VERSION = 'v5';
 const SHELL_CACHE = 'shell-' + VERSION;
 const RUNTIME_CACHE = 'runtime-' + VERSION;
 const SHELL = ['./', 'index.html', 'style.css', 'app.js', 'manifest.json',

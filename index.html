@@ -95,12 +95,18 @@
 <div id="qr-modal" class="modal" hidden>
   <div class="modal-box">
     <h2>Scan with the other device</h2>
-    <p class="hint">On the other device open this app and tap <b>Scan QR</b> (next to the card-name box). Large collections are split into several codes that cycle automatically.</p>
+    <p class="hint"><b>Link code</b> is one code the other phone's <b>normal camera</b> can open — easiest. <b>Parts</b> shows small cycling codes for the in-app <b>Scan QR</b> button, which works on any phone. <b>Copy link</b> sends it by message instead.</p>
+    <div class="mode-row qr-modes">
+      <button id="qr-mode-link" class="mode">Link code (phone camera)</button>
+      <button id="qr-mode-parts" class="mode">Parts (in-app Scan QR)</button>
+    </div>
     <div id="qr-holder"></div>
     <p id="qr-part" class="hint"></p>
+    <input id="qr-link" class="qr-link" type="text" readonly>
     <div class="result-actions">
       <button id="qr-prev">◀ Prev</button>
       <button id="qr-next" class="primary">Next ▶</button>
+      <button id="qr-copy">Copy link</button>
       <button id="qr-close">Close</button>
     </div>
   </div>

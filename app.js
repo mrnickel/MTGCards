@@ -616,6 +616,19 @@ let qrParts = [], qrIndex = 0;
 
 const b64encode = bytes => btoa(String.fromCharCode(...bytes));
 const b64decode = str => Uint8Array.from(atob(str), ch => ch.charCodeAt(0));
+// URL-safe variants for the #import= share link
+const b64urlEncode = bytes => b64encode(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const b64urlDecode = str => b64decode(str.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - str.length % 4) % 4));
+
+// A share link up to this length still scans reliably with a phone's built-in
+// camera (~150 modules); beyond that only the small multi-part codes work.
+const LINK_QR_MAX = 1500;
+let shareLink = '', qrLinkMode = false, qrChunkParts = [];
+
+const parseCompact = compact => compact.split(';').filter(Boolean).map(e => {
+  const [set, number, qty] = e.split('/');
+  return { set, number, qty: Math.max(1, parseInt(qty, 10) || 1) };
+});
 
 async function deflateText(text) {
   if (!('CompressionStream' in window)) return { enc: 'r', data: new TextEncoder().encode(text) };
@@ -633,15 +646,32 @@ $('btn-share').onclick = async () => {
   if (!all.length) { alert('Collection is empty — nothing to share.'); return; }
   const compact = all.map(c => `${c.set.toLowerCase()}/${c.number}/${c.qty}`).join(';');
   const { enc, data } = await deflateText(compact);
+  shareLink = location.origin + location.pathname + '#import=' + enc + b64urlEncode(data);
   const b64 = b64encode(data);
   const chunks = [];
   for (let i = 0; i < b64.length; i += QR_CHUNK) chunks.push(b64.slice(i, i + QR_CHUNK));
-  qrParts = chunks.map((chunk, i) => `MTGQR|${enc}|${i + 1}|${chunks.length}|${chunk}`);
-  qrIndex = 0;
-  renderQR();
+  qrChunkParts = chunks.map((chunk, i) => `MTGQR|${enc}|${i + 1}|${chunks.length}|${chunk}`);
+  const linkFits = shareLink.length <= LINK_QR_MAX;
+  $('qr-mode-link').disabled = !linkFits;
   $('qr-modal').hidden = false;
-  startQRCycle();
+  setQRMode(linkFits ? 'link' : 'parts');
 };
+
+// 'link'  — one dense code holding a share URL; the phone's built-in camera
+//           reads it and opens the app, which imports on load.
+// 'parts' — small cycling codes for in-app Scan QR (works without a native
+//           barcode detector, e.g. on iOS Safari).
+function setQRMode(mode) {
+  qrLinkMode = mode === 'link';
+  qrParts = qrLinkMode ? [shareLink] : qrChunkParts;
+  qrIndex = 0;
+  $('qr-mode-link').classList.toggle('active', qrLinkMode);
+  $('qr-mode-parts').classList.toggle('active', !qrLinkMode);
+  renderQR();
+  if (qrLinkMode) stopQRCycle(); else startQRCycle();
+}
+$('qr-mode-link').onclick = () => setQRMode('link');
+$('qr-mode-parts').onclick = () => setQRMode('parts');
 function startQRCycle() {
   stopQRCycle();
   if (qrParts.length > 1) qrCycle = setInterval(() => { qrIndex = (qrIndex + 1) % qrParts.length; renderQR(); }, QR_CYCLE_MS);
@@ -653,12 +683,26 @@ function renderQR() {
   qr.addData(qrParts[qrIndex], 'Byte');
   qr.make();
   $('qr-holder').innerHTML = qr.createSvgTag({ scalable: true, margin: 2 });
-  $('qr-part').textContent = qrParts.length > 1
-    ? `Part ${qrIndex + 1} of ${qrParts.length} — cycling automatically; hold the scanner steady until it has every part`
-    : 'Single code — contains the whole collection';
+  $('qr-part').textContent = qrLinkMode
+    ? "Point the other phone's normal camera at this code — it opens the app and imports."
+    : qrParts.length > 1
+      ? `Part ${qrIndex + 1} of ${qrParts.length} — cycling automatically; tap Scan QR on the other device and hold steady until it has every part`
+      : 'Tap Scan QR on the other device and point it at this code.';
+  $('qr-link').value = shareLink;
+  $('qr-prev').hidden = $('qr-next').hidden = qrLinkMode;
   $('qr-prev').disabled = qrIndex === 0;
   $('qr-next').disabled = qrIndex === qrParts.length - 1;
 }
+$('qr-copy').onclick = async () => {
+  try {
+    if (navigator.share) { await navigator.share({ title: 'MTG collection', url: shareLink }); return; }
+    await navigator.clipboard.writeText(shareLink);
+    toast('Link copied — open it on the other device to import.');
+  } catch (e) {
+    $('qr-link').focus(); $('qr-link').select();
+    toast('Copy the highlighted link and open it on the other device.');
+  }
+};
 $('qr-prev').onclick = () => { stopQRCycle(); if (qrIndex > 0) { qrIndex--; renderQR(); } };
 $('qr-next').onclick = () => { stopQRCycle(); if (qrIndex < qrParts.length - 1) { qrIndex++; renderQR(); } };
 $('qr-close').onclick = () => { stopQRCycle(); $('qr-modal').hidden = true; };
@@ -671,6 +715,7 @@ $('btn-scanqr').onclick = async () => {
   if (!stream) return;
   qrMode = true;
   qrGot = { enc: null, total: null, parts: new Map() };
+  qrFrames = 0;
   $('btn-scanqr').textContent = 'Cancel QR';
   $('qr-hint').hidden = false;
   setStatus('Point the camera at the QR code…');
@@ -697,24 +742,72 @@ function setQRZoom(on) {
   } else applySavedZoom();
 }
 
-function qrLoop() {
+// Chrome/Android expose a native QR decoder that is far more tolerant of blur
+// and perspective than jsQR; use it when present and fall back to jsQR.
+let qrDetector = null, qrDetectorTried = false;
+async function getQRDetector() {
+  if (qrDetectorTried) return qrDetector;
+  qrDetectorTried = true;
+  try {
+    if ('BarcodeDetector' in window) {
+      const formats = await BarcodeDetector.getSupportedFormats();
+      if (formats.includes('qr_code')) qrDetector = new BarcodeDetector({ formats: ['qr_code'] });
+    }
+  } catch (e) { console.warn('BarcodeDetector unavailable', e); }
+  return qrDetector;
+}
+
+// Try the whole frame, then a centre crop upscaled 2× (helps when the code is
+// small in frame, which is where jsQR usually gives up).
+function jsqrDecode(source, sw, sh) {
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  const attempt = (sx, sy, cw, ch, scale) => {
+    canvas.width = Math.round(cw * scale); canvas.height = Math.round(ch * scale);
+    ctx.drawImage(source, sx, sy, cw, ch, 0, 0, canvas.width, canvas.height);
+    const hit = jsQR(ctx.getImageData(0, 0, canvas.width, canvas.height).data,
+                     canvas.width, canvas.height, { inversionAttempts: 'attemptBoth' });
+    return hit && hit.data ? hit.data : null;
+  };
+  const full = Math.min(1, 1600 / sw);
+  return attempt(0, 0, sw, sh, full)
+      || attempt(sw * 0.2, sh * 0.2, sw * 0.6, sh * 0.6, Math.min(2, 1600 / (sw * 0.6)));
+}
+
+let qrFrames = 0;
+async function qrLoop() {
   if (!qrMode || !stream) return;
   try {
-    if (video.readyState >= 2) {
-      // Decode at (near) full camera resolution — small modules vanish when downscaled.
-      const w = Math.min(1920, video.videoWidth);
-      const h = Math.round(video.videoHeight * (w / video.videoWidth));
-      canvas.width = w; canvas.height = h;
-      const ctx = canvas.getContext('2d', { willReadFrequently: true });
-      ctx.drawImage(video, 0, 0, w, h);
-      const hit = jsQR(ctx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: 'attemptBoth' });
-      if (hit && hit.data) handleQRPayload(hit.data);
+    if (video.readyState >= 2 && video.videoWidth) {
+      qrFrames++;
+      let data = null;
+      const det = await getQRDetector();
+      if (det) {
+        const found = await det.detect(video).catch(() => []);
+        if (found && found.length) data = found[0].rawValue;
+      }
+      if (!data) data = jsqrDecode(video, video.videoWidth, video.videoHeight);
+      if (data) handleQRPayload(data);
+      else if (qrMode) {
+        const got = qrGot.total ? ` — ${qrGot.parts.size}/${qrGot.total} parts` : '';
+        setStatus(`Looking for a QR code… ${qrFrames} frames checked${got}`);
+      }
+    } else {
+      setStatus('Waiting for the camera…');
     }
-  } catch (e) { console.warn('qr pass failed', e); }
-  if (qrMode) qrTimer = setTimeout(qrLoop, 250);
+  } catch (e) {
+    console.warn('qr pass failed', e);
+    setStatus('QR decoder error: ' + e.message);
+  }
+  if (qrMode) qrTimer = setTimeout(qrLoop, 200);
 }
 
 async function handleQRPayload(text) {
+  // A share-link QR carries the whole collection in one code
+  if (/[#&]import=/.test(text)) {
+    stopQRScan(); stopCamera();
+    await importFromLink(text);
+    return;
+  }
   const m = /^MTGQR\|([zr])\|(\d+)\|(\d+)\|([A-Za-z0-9+/=]+)$/.exec(text);
   if (!m) { setStatus('That QR code is not an MTG Scanner collection code.'); return; }
   const [, enc, part, total, data] = m;
@@ -731,11 +824,7 @@ async function handleQRPayload(text) {
   try {
     const b64 = Array.from({ length: qrGot.total }, (_, i) => qrGot.parts.get(i + 1)).join('');
     const compact = await inflateText(qrGot.enc, b64decode(b64));
-    const entries = compact.split(';').filter(Boolean).map(e => {
-      const [set, number, qty] = e.split('/');
-      return { set, number, qty: Math.max(1, parseInt(qty, 10) || 1) };
-    });
-    await importEntries(entries);
+    await importEntries(parseCompact(compact));
   } catch (e) {
     setStatus('QR import failed: ' + e.message);
   }
@@ -773,10 +862,32 @@ async function importEntries(entries) {
   alert(`Imported ${done - failed.length} of ${entries.length} cards.` + (failed.length ? `\nNot found: ${failed.join(', ')}` : ''));
 }
 
+// ---------- Share-link import (#import=…) ----------
+async function importFromLink(url) {
+  const m = /[#&]import=([zr])([A-Za-z0-9\-_]+)/.exec(url);
+  if (!m) return false;
+  try {
+    const compact = await inflateText(m[1], b64urlDecode(m[2]));
+    const entries = parseCompact(compact);
+    if (!entries.length) throw new Error('no cards in link');
+    showView('scan');
+    setStatus(`Importing ${entries.length} cards from link…`);
+    await importEntries(entries);
+  } catch (e) {
+    setStatus('That import link is invalid: ' + e.message);
+  }
+  return true;
+}
+
 // ---------- Init ----------
 (async () => {
   db = await openDB();
   updateCount();
+  if (/[#&]import=/.test(location.hash)) {
+    const url = location.href;
+    history.replaceState(null, '', location.pathname + location.search);
+    await importFromLink(url);
+  }
   if ('serviceWorker' in navigator) {
     try { await navigator.serviceWorker.register('sw.js'); }
     catch (e) { console.warn('SW registration failed', e); }
